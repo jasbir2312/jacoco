@@ -11,12 +11,13 @@
  *******************************************************************************/
 package org.jacoco.core.internal.analysis;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.jacoco.core.analysis.ICounter;
 import org.jacoco.core.internal.analysis.filter.IFilterOutput;
 import org.jacoco.core.internal.flow.Instruction;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -62,7 +63,7 @@ class MethodCoverageCalculator implements IFilterOutput {
 			final AbstractInsnNode r = findRepresentative(m);
 			if (r != m) {
 				ignored.add(m);
-				instructions.get(r).merge(i.getValue());
+				instructions.put(r, instructions.get(r).merge(i.getValue()));
 			}
 		}
 
@@ -73,31 +74,19 @@ class MethodCoverageCalculator implements IFilterOutput {
 				continue;
 			}
 
-			final Instruction insn = i.getValue();
+			Instruction insn = i.getValue();
 
-			final int total;
-			final int covered;
 			final Set<AbstractInsnNode> r = replacements.get(i.getKey());
 			if (r != null) {
-				int cb = 0;
+				final List<Instruction> newBranches = new ArrayList<Instruction>();
 				for (final AbstractInsnNode b : r) {
-					if (instructions.get(b).getCoveredBranches() > 0) {
-						cb++;
-					}
+					newBranches.add(instructions.get(b));
 				}
-				total = r.size();
-				covered = cb;
-			} else {
-				total = insn.getBranches();
-				covered = insn.getCoveredBranches();
+				insn = insn.replaceBranches(newBranches);
 			}
 
-			final ICounter instrCounter = covered == 0 ? CounterImpl.COUNTER_1_0
-					: CounterImpl.COUNTER_0_1;
-			final ICounter branchCounter = total > 1
-					? CounterImpl.getInstance(total - covered, covered)
-					: CounterImpl.COUNTER_0_0;
-			coverage.increment(instrCounter, branchCounter, insn.getLine());
+			coverage.increment(insn.getInstructionCounter(),
+					insn.getBranchCounter(), insn.getLine());
 		}
 		coverage.incrementMethodCounter();
 	}

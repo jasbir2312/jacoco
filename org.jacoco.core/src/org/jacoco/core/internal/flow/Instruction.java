@@ -12,10 +12,46 @@
 package org.jacoco.core.internal.flow;
 
 import java.util.BitSet;
+import java.util.Collection;
+
+import org.jacoco.core.analysis.ICounter;
+import org.jacoco.core.internal.analysis.CounterImpl;
 
 /**
- * Representation of a byte code instruction for analysis. Internally used for
- * analysis.
+ * Execution status of a single byte code instruction internally used for
+ * coverage analysis. The execution status is recorded separately for each
+ * outgoing branch. Each instructions has at least one branch, for example in
+ * case of a simple sequence of instructions (by convention branch 0). Instances
+ * of this class is use in two steps:
+ * 
+ * <h3>Step 1: Building the CFG</h3>
+ * 
+ * For each bytecode instruction of a method a {@link Instruction} instance is
+ * created. In correspondence with the CFG these instances are linked with each
+ * other with the <code>addBranch()</code> methods. The executions status is
+ * either be directly derived from a probe which has been inserted in the
+ * execution flow ({@link #addBranch(boolean, int)}). Or indirectly propagated
+ * along the CFG edges ({@link #addBranch(Instruction, int)}).
+ * 
+ * <h3>Step 2: Querying the Coverage Status</h3>
+ * 
+ * After all instructions have been created and linked each instruction knows
+ * its execution status and can be queried with:
+ * 
+ * <ul>
+ * <li>{@link #getLine()}</li>
+ * <li>{@link #getInstructionCounter()}</li>
+ * <li>{@link #getBranchCounter()}</li>
+ * </ul>
+ * 
+ * For the purpose of filtering instructions can be combined to new
+ * instructions. Note that these methods create new {@link Instruction}
+ * instances and do not modify the existing ones.
+ * 
+ * <ul>
+ * <li>{@link #merge(Instruction)}</li>
+ * <li>{@link #replaceBranches(Collection)}</li>
+ * </ul>
  */
 public class Instruction {
 
@@ -42,53 +78,58 @@ public class Instruction {
 	}
 
 	/**
-	 * Adds an branch to this instruction.
-	 */
-	public void addBranch() {
-		branches++;
-	}
-
-	/**
-	 * Sets the given instruction as a predecessor of this instruction and adds
-	 * branch to the predecessor. Probes are inserted in a way that every
-	 * instruction has at most one direct predecessor.
+	 * Adds a branch to this instruction which execution status is indirectly
+	 * derived from the execution status of the target instruction. In case the
+	 * branch is covered the status is propagated also to the predecessors of
+	 * this instruction.
 	 * 
-	 * @see #addBranch()
-	 * @param predecessor
-	 *            predecessor instruction
+	 * Note: This method is not idempotent and must be called exactly once for
+	 * every branch
+	 * 
+	 * @param target
+	 *            target instruction of this branch
 	 * @param branch
-	 *            branch number in predecessor that should be marked as covered
-	 *            when this instruction marked as covered
+	 *            branch identifier unique for this instruction
 	 */
-	public void setPredecessor(final Instruction predecessor,
-			final int branch) {
-		this.predecessor = predecessor;
-		predecessor.addBranch();
-		this.predecessorBranch = branch;
-		if (!coveredBranches.isEmpty()) {
-			predecessor.setCovered(branch);
+	public void addBranch(final Instruction target, final int branch) {
+		branches++;
+		target.predecessor = this;
+		target.predecessorBranch = branch;
+		if (!target.coveredBranches.isEmpty()) {
+			propagateExecutedBranch(this, branch);
 		}
 	}
 
 	/**
-	 * Marks one branch of this instruction as covered. Also recursively marks
-	 * all predecessor instructions as covered if this is the first covered
-	 * branch.
-	 *
+	 * Adds a branch to this instruction which execution status is directly
+	 * derived from a probe. In case the branch is covered the status is
+	 * propagated also to the predecessors of this instruction.
+	 * 
+	 * Note: This method is not idempotent and must be called exactly once for
+	 * every branch
+	 * 
+	 * @param executed
+	 *            whether the corresponding probe has been executed
 	 * @param branch
-	 *            branch number to mark as covered
+	 *            branch identifier unique for this instruction
 	 */
-	public void setCovered(final int branch) {
-		Instruction i = this;
-		int b = branch;
-		while (i != null) {
-			if (!i.coveredBranches.isEmpty()) {
-				i.coveredBranches.set(b);
+	public void addBranch(final boolean executed, final int branch) {
+		branches++;
+		if (executed) {
+			propagateExecutedBranch(this, branch);
+		}
+	}
+
+	private static void propagateExecutedBranch(Instruction insn, int branch) {
+		// No recursion here, as there can be very long chains of instructions
+		while (insn != null) {
+			if (!insn.coveredBranches.isEmpty()) {
+				insn.coveredBranches.set(branch);
 				break;
 			}
-			i.coveredBranches.set(b);
-			b = i.predecessorBranch;
-			i = i.predecessor;
+			insn.coveredBranches.set(branch);
+			branch = insn.predecessorBranch;
+			insn = insn.predecessor;
 		}
 	}
 
@@ -102,37 +143,66 @@ public class Instruction {
 	}
 
 	/**
-	 * Returns the total number of branches starting from this instruction.
+	 * Merges information about covered branches of this instruction with
+	 * another instruction.
 	 * 
-	 * @return total number of branches
+	 * @param other
+	 *            instruction to merge with
+	 * @return new instance with merged branches
 	 */
-	public int getBranches() {
-		return branches;
+	public Instruction merge(final Instruction other) {
+		final Instruction result = new Instruction(this.line);
+		result.branches = this.branches;
+		result.coveredBranches.or(this.coveredBranches);
+		result.coveredBranches.or(other.coveredBranches);
+		return result;
 	}
 
 	/**
-	 * Returns the number of covered branches starting from this instruction.
+	 * Creates a copy of this instruction where all outgoing branches are
+	 * replaced with the given instructions. The coverage status of the new
+	 * instruction is derived from on the status of the given instructions.
 	 * 
-	 * @return number of covered branches
+	 * @param newBranches
+	 *            new branches to consider
+	 * @return new instance with replaced branches
 	 */
-	public int getCoveredBranches() {
-		return coveredBranches.cardinality();
+	public Instruction replaceBranches(
+			final Collection<Instruction> newBranches) {
+		final Instruction result = new Instruction(this.line);
+		result.branches = newBranches.size();
+		int idx = 0;
+		for (final Instruction b : newBranches) {
+			if (!b.coveredBranches.isEmpty()) {
+				result.coveredBranches.set(idx++);
+			}
+		}
+		return result;
 	}
 
 	/**
-	 * Merges information about covered branches of given instruction into this
-	 * instruction.
+	 * Returns the instruction coverage counter of this instruction. It's always
+	 * 1 instruction which is covered or not.
 	 * 
-	 * @param instruction
-	 *            instruction from which to merge
+	 * @return the instruction coverage counter
 	 */
-	public void merge(final Instruction instruction) {
-		this.coveredBranches.or(instruction.coveredBranches);
+	public ICounter getInstructionCounter() {
+		return coveredBranches.isEmpty() ? CounterImpl.COUNTER_1_0
+				: CounterImpl.COUNTER_0_1;
 	}
 
-	@Override
-	public String toString() {
-		return coveredBranches.toString();
+	/**
+	 * Returns the branch coverage counter of this instruction. Only
+	 * instructions with at least 2 outgoing edges to report branches.
+	 * 
+	 * @return
+	 */
+	public ICounter getBranchCounter() {
+		if (branches < 2) {
+			return CounterImpl.COUNTER_0_0;
+		}
+		final int covered = coveredBranches.cardinality();
+		return CounterImpl.getInstance(branches - covered, covered);
 	}
 
 }
