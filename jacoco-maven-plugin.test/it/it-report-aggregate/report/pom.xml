@@ -46,7 +46,7 @@
   <build>
     <plugins>
       <plugin>
-        <groupId>@project.groupId@</groupId>
+        <groupId>org.jacoco</groupId>
         <artifactId>jacoco-maven-plugin</artifactId>
         <executions>
           <execution>
